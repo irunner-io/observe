@@ -1,0 +1,19 @@
+{
+  "name": "ir-observe",
+  "version": "1.0.0",
+  "private": true,
+  "description": "IRunner build metrics for GitHub Actions",
+  "scripts": {
+    "build": "tsc && ncc build -o dist/main src/main.ts && ncc build -o dist/post src/post.ts",
+    "test": "jest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@actions/core": "^2.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vercel/ncc": "^0.38.0",
+    "typescript": "^5.5.0"
+  }
+}

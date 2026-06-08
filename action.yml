@@ -1,0 +1,31 @@
+name: 'IRunner Observe'
+description: 'Renders build metrics (CPU, memory, disk, network) in the GitHub job summary. Add as the first step.'
+author: 'IRunner'
+inputs:
+  show-disk:
+    description: 'Show disk I/O metrics'
+    default: 'true'
+    required: false
+  show-network:
+    description: 'Show network metrics'
+    default: 'true'
+    required: false
+outputs:
+  duration:
+    description: 'Job duration in seconds'
+  cpu-avg:
+    description: 'Average CPU utilization percentage'
+  cpu-peak:
+    description: 'Peak CPU utilization percentage'
+  mem-avg-mb:
+    description: 'Average memory usage in MB'
+  mem-peak-mb:
+    description: 'Peak memory usage in MB'
+runs:
+  using: 'node24'
+  main: 'dist/main/index.js'
+  post: 'dist/post/index.js'
+  post-if: 'always()'
+branding:
+  icon: 'activity'
+  color: 'blue'
