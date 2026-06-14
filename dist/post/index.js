@@ -31596,49 +31596,54 @@ function renderToLog(samples, showDisk, showNetwork) {
     console.log("");
 }
 function renderAsciiChart(values, label, unit, min, max) {
-    const width = 60;
-    const height = 12;
+    const width = 70;
     const sampled = downsample(values, width);
     const range = max - min || 1;
-    // Render chart rows (top to bottom)
-    for (let row = height; row >= 1; row--) {
-        const threshold = min + (row / height) * range;
-        const yLabel = threshold.toFixed(threshold >= 100 ? 0 : threshold >= 10 ? 1 : 2);
-        const padding = " ".repeat(Math.max(0, 7 - yLabel.length));
-        let line = `${padding}${yLabel} ┤`;
+    const blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    // Sparkline bar chart — each column is one block character (8 levels)
+    const barHeight = 8;
+    const rows = [];
+    for (let row = barHeight; row >= 1; row--) {
+        let line = "";
         for (let col = 0; col < sampled.length; col++) {
-            const val = sampled[col];
-            const nextVal = col < sampled.length - 1 ? sampled[col + 1] : val;
-            const prevVal = col > 0 ? sampled[col - 1] : val;
-            const valRow = Math.ceil(((val - min) / range) * height);
-            const nextRow = Math.ceil(((nextVal - min) / range) * height);
-            if (valRow === row) {
-                if (nextRow > row) {
-                    line += "╱";
-                }
-                else if (nextRow < row) {
-                    line += "╲";
-                }
-                else {
-                    line += "─";
-                }
+            const normalized = (sampled[col] - min) / range;
+            const filledRows = normalized * barHeight;
+            if (filledRows >= row) {
+                line += "█";
             }
-            else if (valRow > row && Math.ceil(((prevVal - min) / range) * height) <= row) {
-                line += "│";
-            }
-            else if (valRow < row && Math.ceil(((prevVal - min) / range) * height) >= row) {
-                line += "│";
+            else if (filledRows >= row - 1 && filledRows < row) {
+                const frac = filledRows - (row - 1);
+                const blockIdx = Math.round(frac * 8);
+                line += blocks[Math.min(blockIdx, 8)];
             }
             else {
                 line += " ";
             }
         }
-        console.log(line);
+        rows.push(line);
     }
-    // X-axis
-    const axisPadding = " ".repeat(8);
-    console.log(`${axisPadding}└${"─".repeat(width)}`);
-    console.log(`${axisPadding}  ${label}`);
+    // Y-axis labels (top, mid, bottom)
+    const maxLabel = max.toFixed(max >= 100 ? 0 : 1);
+    const midLabel = ((max + min) / 2).toFixed((max + min) / 2 >= 100 ? 0 : 1);
+    const minLabel = min.toFixed(min >= 100 ? 0 : 1);
+    const labelWidth = Math.max(maxLabel.length, midLabel.length, minLabel.length) + 1;
+    for (let i = 0; i < rows.length; i++) {
+        let yLabel = "";
+        if (i === 0)
+            yLabel = maxLabel;
+        else if (i === Math.floor(rows.length / 2))
+            yLabel = midLabel;
+        else if (i === rows.length - 1)
+            yLabel = minLabel;
+        const pad = " ".repeat(labelWidth - yLabel.length);
+        console.log(`${pad}${yLabel} │${rows[i]}│`);
+    }
+    // Time axis
+    const duration = values.length;
+    const pad = " ".repeat(labelWidth + 1);
+    console.log(`${pad}└${"─".repeat(width)}┘`);
+    console.log(`${pad} 0s${" ".repeat(Math.max(0, width - 6 - String(duration).length))}${duration}s`);
+    console.log(`${pad} ${label}`);
 }
 function renderMarkdownSummary(samples) {
     const duration = samples[samples.length - 1].ts - samples[0].ts;
