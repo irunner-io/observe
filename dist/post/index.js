@@ -31384,6 +31384,11 @@ const ON_DEMAND_PRICING = {
     "t3.medium": 0.0416,
     "t3.large": 0.0832,
     "t3.xlarge": 0.1664,
+    "t4g.micro": 0.0084,
+    "t4g.small": 0.0168,
+    "t4g.medium": 0.0336,
+    "t4g.large": 0.0672,
+    "t4g.xlarge": 0.1344,
 };
 // Spot discount estimate (conservative — actual price from SpotPriceCache is better)
 const SPOT_DISCOUNT = 0.7; // spot is typically 30-70% cheaper
