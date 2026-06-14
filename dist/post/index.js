@@ -31363,12 +31363,52 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
 const fs = __importStar(__nccwpck_require__(9896));
+const child_process_1 = __nccwpck_require__(5317);
+// GitHub Actions market rates ($/min) for "what GitHub would charge" comparison
+const GITHUB_RATE_PER_MIN = {
+    linux: 0.008,
+    windows: 0.016,
+    macos: 0.08,
+};
+// On-demand pricing ($/hour) — used when spot price unavailable
+const ON_DEMAND_PRICING = {
+    "m7i.medium": 0.0504,
+    "m7i.large": 0.1008,
+    "m7i.xlarge": 0.2016,
+    "m7i.2xlarge": 0.4032,
+    "m7i.4xlarge": 0.8064,
+    "m6i.large": 0.096,
+    "m6i.xlarge": 0.192,
+    "c7i.large": 0.0892,
+    "c7i.xlarge": 0.1785,
+    "t3.medium": 0.0416,
+    "t3.large": 0.0832,
+    "t3.xlarge": 0.1664,
+};
+// Spot discount estimate (conservative — actual price from SpotPriceCache is better)
+const SPOT_DISCOUNT = 0.7; // spot is typically 30-70% cheaper
 async function run() {
     try {
         const metricsFile = "/tmp/ir-metrics.jsonl";
         const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+        // Calculate job duration from saved state
+        const startMs = parseInt(core.getState("observe_start_ms") || "0");
+        const durationSec = startMs > 0 ? Math.round((Date.now() - startMs) / 1000) : 0;
+        // Render IRcoin cost (always — doesn't depend on metrics collector)
+        const showCost = core.getInput("show-cost") !== "false";
+        if (showCost && durationSec > 0) {
+            const costResult = renderCost(durationSec);
+            if (costResult && summaryFile) {
+                fs.appendFileSync(summaryFile, costResult.markdown);
+            }
+            if (costResult) {
+                core.setOutput("cost-actual", String(costResult.actualCoins));
+                core.setOutput("cost-github-equiv", String(costResult.githubCoins));
+                core.setOutput("cost-savings-pct", String(costResult.savingsPct));
+            }
+        }
         if (!fs.existsSync(metricsFile)) {
-            core.info("No metrics file found — skipping");
+            core.info("No metrics file found — skipping resource charts");
             return;
         }
         const lines = fs.readFileSync(metricsFile, "utf-8").trim().split("\n").filter(Boolean);
@@ -31399,6 +31439,114 @@ async function run() {
     }
     catch (error) {
         core.debug(`Observe post error: ${error}`);
+    }
+}
+function renderCost(durationSec) {
+    // Get instance metadata from IMDS
+    const instanceType = getIMDSField("instance-type");
+    if (!instanceType)
+        return null;
+    const lifecycle = getIMDSField("instance-life-cycle") || "on-demand";
+    const isSpot = lifecycle === "spot";
+    const os = "linux"; // IR only supports Linux runners currently
+    // Calculate actual compute cost
+    let pricePerHour = null;
+    let priceSource = "";
+    if (isSpot) {
+        const onDemand = ON_DEMAND_PRICING[instanceType];
+        if (onDemand) {
+            pricePerHour = onDemand * (1 - SPOT_DISCOUNT);
+            priceSource = "spot (estimated)";
+        }
+    }
+    else {
+        pricePerHour = ON_DEMAND_PRICING[instanceType] || null;
+        priceSource = "on-demand";
+    }
+    // GitHub equivalent
+    const githubRate = GITHUB_RATE_PER_MIN[os] || 0.008;
+    const githubCoins = Math.ceil(githubRate * (durationSec / 60) * 100);
+    // Actual cost
+    let actualCoins = null;
+    if (pricePerHour !== null) {
+        actualCoins = Math.ceil(pricePerHour * (durationSec / 3600) * 100);
+    }
+    const savingsPct = actualCoins !== null && githubCoins > 0
+        ? Math.round(((githubCoins - actualCoins) / githubCoins) * 100)
+        : 0;
+    // Render to console
+    console.log("");
+    console.log("💰 Build Cost (IRcoins)");
+    console.log("═".repeat(56));
+    console.log(`  GitHub would charge:     ${githubCoins} coins ($${(githubCoins / 100).toFixed(2)})`);
+    if (actualCoins !== null) {
+        console.log(`  Your actual cost:        ${actualCoins} coins ($${(actualCoins / 100).toFixed(2)})`);
+        console.log(`  Savings:                 ${githubCoins - actualCoins} coins (${savingsPct}% less)`);
+    }
+    else {
+        console.log(`  Your actual cost:        ⚠️ data not available`);
+    }
+    console.log("─".repeat(56));
+    console.log(`  Breakdown:`);
+    if (pricePerHour !== null) {
+        console.log(`    Compute (${instanceType} ${priceSource}, ${formatDuration(durationSec)})  ${actualCoins} coins`);
+    }
+    else {
+        console.log(`    Compute (${instanceType})  ⚠️ price not in table`);
+    }
+    console.log(`    Cache transfer          ⚠️ data not available`);
+    console.log(`    Network egress          ⚠️ data not available`);
+    if (actualCoins !== null) {
+        console.log(`  Note: total is a lower bound (some components not metered)`);
+    }
+    console.log("═".repeat(56));
+    console.log("");
+    // Markdown for job summary
+    const mdLines = [];
+    mdLines.push("");
+    mdLines.push("---");
+    mdLines.push("### 💰 Build Cost (IRcoins)");
+    mdLines.push("");
+    mdLines.push(`| | Coins | USD |`);
+    mdLines.push(`|--|-------|-----|`);
+    mdLines.push(`| GitHub would charge | ${githubCoins} | $${(githubCoins / 100).toFixed(2)} |`);
+    if (actualCoins !== null) {
+        mdLines.push(`| **Your actual cost** | **${actualCoins}** | **$${(actualCoins / 100).toFixed(2)}** |`);
+        mdLines.push(`| **Savings** | **${githubCoins - actualCoins}** | **${savingsPct}% less** |`);
+    }
+    else {
+        mdLines.push(`| Your actual cost | — | data not available |`);
+    }
+    mdLines.push("");
+    mdLines.push(`<details><summary>Breakdown</summary>`);
+    mdLines.push("");
+    mdLines.push(`| Component | Value |`);
+    mdLines.push(`|-----------|-------|`);
+    mdLines.push(`| Instance | ${instanceType} (${lifecycle}) |`);
+    mdLines.push(`| Duration | ${formatDuration(durationSec)} |`);
+    if (pricePerHour !== null) {
+        mdLines.push(`| Compute | ${actualCoins} coins ($${pricePerHour.toFixed(4)}/hr × ${(durationSec / 3600).toFixed(3)}hr) |`);
+    }
+    mdLines.push(`| Cache transfer | ⚠️ not metered yet |`);
+    mdLines.push(`| Network egress | ⚠️ not metered yet |`);
+    mdLines.push("");
+    mdLines.push(`*1 IRcoin = 1 cent USD. Lower bound — unmetered components excluded.*`);
+    mdLines.push(`</details>`);
+    mdLines.push("");
+    return {
+        actualCoins: actualCoins || 0,
+        githubCoins,
+        savingsPct,
+        markdown: mdLines.join("\n"),
+    };
+}
+function getIMDSField(field) {
+    try {
+        const token = (0, child_process_1.execSync)('curl -sf -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null', { timeout: 2000 }).toString().trim();
+        return (0, child_process_1.execSync)(`curl -sf -H "X-aws-ec2-metadata-token: ${token}" http://169.254.169.254/latest/meta-data/${field} 2>/dev/null`, { timeout: 2000 }).toString().trim();
+    }
+    catch {
+        return "";
     }
 }
 function renderToLog(samples, showDisk, showNetwork) {
