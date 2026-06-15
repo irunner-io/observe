@@ -115,20 +115,69 @@ interface CostResult {
   markdown: string;
 }
 
+interface ServerCost {
+  instance_type?: string;
+  is_spot?: boolean;
+  price_per_hour?: number;
+  compute_cents?: number;
+  cache_download_bytes?: number;
+  cache_upload_bytes?: number;
+  cache_transfer_cents?: number;
+  actual_total_cents?: number;
+  github_equiv_cents?: number;
+  unavailable?: string[];
+}
+
+function fetchServerCost(jobID: string): ServerCost | null {
+  const cacheUrl = process.env.IR_CACHE_URL || process.env.ACTIONS_CACHE_URL || "";
+  if (!cacheUrl || !jobID) return null;
+
+  const baseUrl = cacheUrl.replace(/\/cache\/?$/, "");
+  try {
+    const result = execSync(
+      `curl -sf --max-time 3 "${baseUrl}/internal/job-cost/gh-${jobID}" 2>/dev/null`,
+      { timeout: 5000 }
+    ).toString().trim();
+    if (!result) return null;
+    return JSON.parse(result);
+  } catch {
+    return null;
+  }
+}
+
 function renderCost(durationSec: number): CostResult | null {
-  // Get instance metadata from IMDS
   const instanceType = getIMDSField("instance-type");
   if (!instanceType) return null;
 
   const lifecycle = getIMDSField("instance-life-cycle") || "on-demand";
   const isSpot = lifecycle === "spot";
-  const os = "linux"; // IR only supports Linux runners currently
+  const os = "linux";
 
-  // Calculate actual compute cost
+  // Try fetching server-computed cost (graceful failure)
+  // Extract numeric job ID from runner name (format: ir-{runID}-{jobID})
+  const runnerName = process.env.RUNNER_NAME || "";
+  const runnerParts = runnerName.split("-");
+  const platformJobID = runnerParts.length >= 3 && runnerParts[0] === "ir"
+    ? runnerParts[runnerParts.length - 1]
+    : "";
+  const serverCost = fetchServerCost(platformJobID);
+
+  // Resolve price: server > local table > null
   let pricePerHour: number | null = null;
   let priceSource = "";
+  let computeCents: number | null = null;
+  let cacheDownloadBytes: number | null = null;
+  let cacheUploadBytes: number | null = null;
+  let cacheTransferCents: number | null = null;
 
-  if (isSpot) {
+  if (serverCost && serverCost.price_per_hour) {
+    pricePerHour = serverCost.price_per_hour;
+    priceSource = serverCost.is_spot ? "spot (actual)" : "on-demand";
+    computeCents = serverCost.compute_cents || null;
+    cacheDownloadBytes = serverCost.cache_download_bytes || null;
+    cacheUploadBytes = serverCost.cache_upload_bytes || null;
+    cacheTransferCents = serverCost.cache_transfer_cents || null;
+  } else if (isSpot) {
     const onDemand = ON_DEMAND_PRICING[instanceType];
     if (onDemand) {
       pricePerHour = onDemand * (1 - SPOT_DISCOUNT);
@@ -141,16 +190,24 @@ function renderCost(durationSec: number): CostResult | null {
 
   // GitHub equivalent
   const githubRate = GITHUB_RATE_PER_MIN[os] || 0.008;
-  const githubCoins = Math.ceil(githubRate * (durationSec / 60) * 100);
+  const githubCoins = serverCost?.github_equiv_cents
+    || Math.ceil(githubRate * (durationSec / 60) * 100);
 
   // Actual cost
-  let actualCoins: number | null = null;
-  if (pricePerHour !== null) {
+  let actualCoins: number | null = computeCents;
+  if (actualCoins === null && pricePerHour !== null) {
     actualCoins = Math.ceil(pricePerHour * (durationSec / 3600) * 100);
   }
 
-  const savingsPct = actualCoins !== null && githubCoins > 0
-    ? Math.round(((githubCoins - actualCoins) / githubCoins) * 100)
+  // Add cache transfer to total if available
+  let totalCoins = actualCoins;
+  if (totalCoins !== null && cacheTransferCents) {
+    totalCoins += cacheTransferCents;
+  }
+
+  const displayCoins = totalCoins ?? actualCoins;
+  const savingsPct = displayCoins !== null && githubCoins > 0
+    ? Math.round(((githubCoins - displayCoins) / githubCoins) * 100)
     : 0;
 
   // Render to console
@@ -158,9 +215,9 @@ function renderCost(durationSec: number): CostResult | null {
   console.log("💰 Build Cost (IRcoins)");
   console.log("═".repeat(56));
   console.log(`  GitHub would charge:     ${githubCoins} coins ($${(githubCoins / 100).toFixed(2)})`);
-  if (actualCoins !== null) {
-    console.log(`  Your actual cost:        ${actualCoins} coins ($${(actualCoins / 100).toFixed(2)})`);
-    console.log(`  Savings:                 ${githubCoins - actualCoins} coins (${savingsPct}% less)`);
+  if (displayCoins !== null) {
+    console.log(`  Your actual cost:        ${displayCoins} coins ($${(displayCoins / 100).toFixed(2)})`);
+    console.log(`  Savings:                 ${githubCoins - displayCoins} coins (${savingsPct}% less)`);
   } else {
     console.log(`  Your actual cost:        ⚠️ data not available`);
   }
@@ -171,11 +228,15 @@ function renderCost(durationSec: number): CostResult | null {
   } else {
     console.log(`    Compute (${instanceType})  ⚠️ price not in table`);
   }
-  console.log(`    Cache transfer          ⚠️ data not available`);
-  console.log(`    Network egress          ⚠️ data not available`);
-  if (actualCoins !== null) {
-    console.log(`  Note: total is a lower bound (some components not metered)`);
+  if (cacheDownloadBytes !== null || cacheUploadBytes !== null) {
+    const dlMB = cacheDownloadBytes ? (cacheDownloadBytes / 1048576).toFixed(1) : "0";
+    const ulMB = cacheUploadBytes ? (cacheUploadBytes / 1048576).toFixed(1) : "0";
+    const cacheCost = cacheTransferCents ? `${cacheTransferCents} coins` : "included";
+    console.log(`    Cache transfer (↓${dlMB}MB ↑${ulMB}MB)  ${cacheCost}`);
+  } else {
+    console.log(`    Cache transfer          ⚠️ data not available`);
   }
+  console.log(`    Network egress          ⚠️ not metered`);
   console.log("═".repeat(56));
   console.log("");
 
@@ -188,9 +249,9 @@ function renderCost(durationSec: number): CostResult | null {
   mdLines.push(`| | Coins | USD |`);
   mdLines.push(`|--|-------|-----|`);
   mdLines.push(`| GitHub would charge | ${githubCoins} | $${(githubCoins / 100).toFixed(2)} |`);
-  if (actualCoins !== null) {
-    mdLines.push(`| **Your actual cost** | **${actualCoins}** | **$${(actualCoins / 100).toFixed(2)}** |`);
-    mdLines.push(`| **Savings** | **${githubCoins - actualCoins}** | **${savingsPct}% less** |`);
+  if (displayCoins !== null) {
+    mdLines.push(`| **Your actual cost** | **${displayCoins}** | **$${(displayCoins / 100).toFixed(2)}** |`);
+    mdLines.push(`| **Savings** | **${githubCoins - displayCoins}** | **${savingsPct}% less** |`);
   } else {
     mdLines.push(`| Your actual cost | — | data not available |`);
   }
@@ -204,15 +265,21 @@ function renderCost(durationSec: number): CostResult | null {
   if (pricePerHour !== null) {
     mdLines.push(`| Compute | ${actualCoins} coins ($${pricePerHour.toFixed(4)}/hr × ${(durationSec / 3600).toFixed(3)}hr) |`);
   }
-  mdLines.push(`| Cache transfer | ⚠️ not metered yet |`);
-  mdLines.push(`| Network egress | ⚠️ not metered yet |`);
+  if (cacheDownloadBytes !== null || cacheUploadBytes !== null) {
+    const dlMB = cacheDownloadBytes ? (cacheDownloadBytes / 1048576).toFixed(1) : "0";
+    const ulMB = cacheUploadBytes ? (cacheUploadBytes / 1048576).toFixed(1) : "0";
+    mdLines.push(`| Cache | ↓${dlMB}MB ↑${ulMB}MB (${cacheTransferCents || 0} coins) |`);
+  } else {
+    mdLines.push(`| Cache transfer | not metered |`);
+  }
+  mdLines.push(`| Network egress | not metered |`);
   mdLines.push("");
-  mdLines.push(`*1 IRcoin = 1 cent USD. Lower bound — unmetered components excluded.*`);
+  mdLines.push(`*1 IRcoin = 1 cent USD.*`);
   mdLines.push(`</details>`);
   mdLines.push("");
 
   return {
-    actualCoins: actualCoins || 0,
+    actualCoins: displayCoins || 0,
     githubCoins,
     savingsPct,
     markdown: mdLines.join("\n"),
